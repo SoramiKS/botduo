@@ -1,0 +1,2 @@
+# botduo
+Pengingat ngerjain Duolingo
