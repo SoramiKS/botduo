@@ -1,156 +1,107 @@
+require("dotenv").config();
 const { default: makeWASocket, useMultiFileAuthState } = require("@whiskeysockets/baileys");
-const fs = require('fs');
+const fs = require("fs");
 const cron = require("node-cron");
-const qrcode = require('qrcode-terminal');
-const http = require('http');
+const qrcode = require("qrcode");
+const http = require("http");
+const express = require("express");
 const moment = require("moment-timezone");
 
-// Create auth directory if it doesn't exist
-if (!fs.existsSync('./auth')) {
-  fs.mkdirSync('./auth');
-}
+const app = express();
+app.use(express.static(".")); // Menyediakan akses ke file qrcode.png
+
+// Pastikan folder auth ada
+if (!fs.existsSync("./auth")) fs.mkdirSync("./auth");
+
+let latestQR = "";
 
 async function startWhatsApp() {
-  const { state: authState, saveCreds } = await useMultiFileAuthState('./auth');
+  const { state: authState, saveCreds } = await useMultiFileAuthState("./auth");
 
   const sock = makeWASocket({
     auth: authState,
-    printQRInTerminal: true,
-    browser: ['WhatsApp Bot', 'Chrome', '10.0'],
-    connectTimeoutMs: 60000,
-    defaultQueryTimeoutMs: 30000,
-    keepAliveIntervalMs: 10000,
-    markOnlineOnConnect: true,
-    retryRequestDelayMs: 1000
+    browser: ["WhatsApp Bot", "Chrome", "10.0"],
+    printQRInTerminal: false,
   });
 
-  sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+  sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
     if (qr) {
-      console.log('QR Code received, please scan with your WhatsApp app:');
-      qrcode.generate(qr, { small: true });
-    }
-    console.log('Connection state:', connection);
-
-    if (connection === 'close') {
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      console.log('Connection closed with status:', statusCode);
-
-      if (statusCode !== 401) {
-        console.log('Reconnecting...');
-        setTimeout(startWhatsApp, 5000);
-      } else {
-        console.log('Authentication failed. Please scan the QR code again.');
-        fs.rmSync('./auth', { recursive: true, force: true });
-        fs.mkdirSync('./auth');
-        setTimeout(startWhatsApp, 5000);
-      }
+      console.log("Scan QR Code di: http://localhost:3000");
+      latestQR = qr;
+      await qrcode.toFile("./qrcode.png", qr);
     }
 
-    if (connection === 'open') {
-      console.log('Connection established successfully!');
+    if (connection === "close") {
+      console.log("Koneksi terputus, mencoba reconnect...");
+      setTimeout(startWhatsApp, 5000);
+    } else if (connection === "open") {
+      console.log("Bot terhubung ke WhatsApp!");
     }
   });
 
   sock.ev.on("creds.update", saveCreds);
-
-  sock.ev.on('messages.upsert', async ({ messages }) => {
-    const m = messages[0];
-    if (m.key.remoteJid?.endsWith('@g.us')) {
-      console.log('Group ID detected:', m.key.remoteJid);
-    }
-  });
-
-  const targetGroup = "120363392281093231@g.us";
-
+  
   async function sendGroupMessage(text) {
-    await sock.sendMessage(targetGroup, { text });
-    console.log("Pesan terkirim ke grup:", text);
+    try {
+      await sock.sendMessage(process.env.GROUP_ID, { text });
+      console.log("[SENT] =>", text);
+    } catch (error) {
+      console.error("Gagal kirim pesan:", error);
+    }
   }
 
-  // Menggunakan zona waktu WIB (Asia/Jakarta) untuk jadwal
-  cron.schedule("0 7 * * *", () => sendGroupMessage("@everyone Selamat pagi! Mulai hari dengan latihan Duolingo yuk! 🌞🦉"), {
-    scheduled: true,
-    timezone: "Asia/Jakarta"
-  });
-  
-  cron.schedule("0 10 * * *", () => sendGroupMessage("@everyone Sudah sarapan dan latihan Duolingo belum? 🍳🦉"), {
-    scheduled: true,
-    timezone: "Asia/Jakarta"
-  });
-  
-  cron.schedule("0 14 * * *", () => sendGroupMessage("@everyone Siang-siang, yuk cek streak Duolingo kamu! 🔥😏"), {
-    scheduled: true,
-    timezone: "Asia/Jakarta"
-  });
-  
-  cron.schedule("0 18 * * *", () => sendGroupMessage("@everyone Sore hari yang sempurna untuk latihan Duolingo! ☕🦉"), {
-    scheduled: true,
-    timezone: "Asia/Jakarta"
-  });
-  
-  cron.schedule("0 21 * * *", () => sendGroupMessage("@everyone Jangan tidur sebelum latihan Duolingo hari ini! 🌙✨"), {
-    scheduled: true,
-    timezone: "Asia/Jakarta"
-  });
+  const schedules = [
+    { time: "0 7 * * *", message: "@everyone Selamat pagi! 🌞🦉" },
+    { time: "0 10 * * *", message: "@everyone Sudah sarapan dan latihan Duolingo? 🍳🦉" },
+    { time: "0 14 * * *", message: "@everyone Siang-siang, yuk cek streak Duolingo kamu! 🔥😏" },
+    { time: "0 18 * * *", message: "@everyone Sore hari yang sempurna untuk latihan Duolingo! ☕🦉" },
+    { time: "0 21 * * *", message: "@everyone Jangan tidur sebelum latihan Duolingo! 🌙✨" },
+  ];
 
-  console.log("Bot WhatsApp siap jalan...");
-
-  // Make sendGroupMessage available outside
-  global.sendGroupMessage = sendGroupMessage;
+  schedules.forEach(({ time, message }) => {
+    cron.schedule(time, () => sendGroupMessage(message), {
+      scheduled: true,
+      timezone: "Asia/Jakarta",
+    });
+  });
 
   return sock;
 }
 
-startWhatsApp().catch(err => console.log("Error:", err));
+startWhatsApp().catch(console.error);
 
-const readline = require('readline');
-
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout
+// Server Express untuk menampilkan QR Code
+app.get("/", (req, res) => {
+  res.send(`
+    <html>
+      <head>
+        <title>QR Code WhatsApp</title>
+        <meta http-equiv="refresh" content="5"> <!-- Auto-refresh setiap 5 detik -->
+      </head>
+      <body>
+        <h2>Scan QR Code untuk Login</h2>
+        <img src="qrcode.png" alt="QR Code" width="300">
+        <p>QR Code diperbarui otomatis setiap kali ada perubahan.</p>
+      </body>
+    </html>
+  `);
 });
 
-rl.setPrompt('Ketik pesan untuk grup: ');
-rl.prompt();
+app.listen(3000, () => console.log("Akses QR Code di http://localhost:3000"));
 
-rl.on('line', async (message) => {
-  if (message.toLowerCase() === 'exit') {
-    rl.close();
-  } else {
-    await sendGroupMessage(message);
-    rl.prompt();
-  }
-});
+// Server Keep-Alive
+http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("Bot WhatsApp aktif!\n");
+}).listen(8080, "0.0.0.0", () => console.log("Server Keep-Alive di port 8080"));
 
-rl.on('close', () => {
-  console.log('Keluar dari mode input manual.');
-});
-
-// Buat server HTTP sederhana untuk keep-alive
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Bot WhatsApp aktif!\n');
-});
-
-server.listen(8080, '0.0.0.0', () => {
-  console.log('Server keep-alive berjalan di port 8080');
-});
-
-// Keep alive dengan ping sendiri setiap 5 menit
+// Keep bot alive dengan ping
 setInterval(() => {
-  http.get(`http://0.0.0.0:8080`, (res) => {
-    console.log('Keep-alive ping berhasil, status:', res.statusCode);
-  }).on('error', (err) => {
-    console.error('Keep-alive ping gagal:', err.message);
-  });
+  http.get("http://0.0.0.0:8080", (res) => console.log("Ping sukses, status:", res.statusCode))
+    .on("error", (err) => console.error("Ping gagal:", err.message));
 }, 5 * 60 * 1000);
 
-// Fungsi untuk mendapatkan waktu WIB saat ini
-function getWIBTime() {
-  return moment().tz("Asia/Jakarta").format("HH:mm:ss DD-MM-YYYY");
-}
-
-// Log waktu saat ini dalam WIB setiap menit
+// Tampilkan waktu WIB tiap menit
 setInterval(() => {
-  console.log('Waktu WIB saat ini:', getWIBTime());
+  console.log("Waktu WIB sekarang:", moment().tz("Asia/Jakarta").format("HH:mm:ss DD-MM-YYYY"));
 }, 60 * 1000);
